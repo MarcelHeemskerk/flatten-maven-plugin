@@ -89,7 +89,7 @@ public class CreateEffectivePomTest
         ModelBuildingRequest buildingRequest =
             new DefaultModelBuildingRequest().setPomFile( pomFile ).setModelResolver( resolver ).setUserProperties( userProperties );
         setDeclaredField( tested, "modelBuilderThreadSafetyWorkaround", buildModelBuilderThreadSafetyWorkaroundForTest() );
-        Model effectivePom = tested.createEffectivePom( buildingRequest, false, FlattenMode.defaults );
+        Model effectivePom = tested.createEffectivePom( buildingRequest, false, false, FlattenMode.defaults );
         assertThat( effectivePom.getName() ).isEqualTo( magicValue );
     }
 

@@ -238,6 +238,12 @@ public class FlattenMojo
     private Boolean embedBuildProfileDependencies;
 
     /**
+     * Marcel Backbase
+     */
+    @Parameter( defaultValue = "false" )
+    private Boolean embedBuildProfileDependencyManagement;
+
+    /**
      * The {@link MojoExecution} used to get access to the raw configuration of {@link #pomElements} as empty tags are
      * mapped to null.
      */
@@ -544,7 +550,7 @@ public class FlattenMojo
     {
 
         ModelBuildingRequest buildingRequest = createModelBuildingRequest( pomFile );
-        Model effectivePom = createEffectivePom( buildingRequest, isEmbedBuildProfileDependencies(), this.flattenMode );
+        Model effectivePom = createEffectivePom( buildingRequest, isEmbedBuildProfileDependencies(), isEmbedBuildProfileDependencyManagement(), this.flattenMode );
 
         Model flattenedPom = new Model();
 
@@ -869,7 +875,9 @@ public class FlattenMojo
      * @throws MojoExecutionException if anything goes wrong.
      */
     protected Model createEffectivePom( ModelBuildingRequest buildingRequest,
-                                               final boolean embedBuildProfileDependencies, final FlattenMode flattenMode )
+                                               final boolean embedBuildProfileDependencies,
+                                        final boolean embedBuildProfileDependencyManagement,
+                                        final FlattenMode flattenMode )
         throws MojoExecutionException
     {
         ModelBuildingResult buildingResult;
@@ -956,6 +964,12 @@ public class FlattenMojo
         return this.embedBuildProfileDependencies.booleanValue();
     }
 
+    public boolean isEmbedBuildProfileDependencyManagement()
+    {
+
+        return this.embedBuildProfileDependencyManagement.booleanValue();
+    }
+
     /**
      * @param activation is the {@link Activation} of a {@link Profile}.
      * @return <code>true</code> if the given {@link Activation} is build-time driven, <code>false</code> otherwise (if
@@ -986,6 +1000,7 @@ public class FlattenMojo
     protected List<Dependency> createFlattenedDependencies( Model effectiveModel )
             throws MojoExecutionException {
         List<Dependency> flattenedDependencies = new ArrayList<Dependency>();
+
         // resolve all direct and inherited dependencies...
         try {
             createFlattenedDependencies( effectiveModel, flattenedDependencies );
@@ -1020,7 +1035,53 @@ public class FlattenMojo
             }
             getLog().debug( "Resolved " + flattenedDependencies.size() + " dependency/-ies for flattened POM." );
         }
+
         return flattenedDependencies;
+    }
+
+    protected List<Dependency> createFlattenedDependencyManagementDependencies( Model effectiveModel )
+            throws MojoExecutionException {
+        List<Dependency> flattenedDependencyManagementDependencies = new ArrayList<Dependency>();
+
+        // resolve all direct and inherited dependencies...
+        try {
+            createFlattenedDependencyManagementDependencies( effectiveModel, flattenedDependencyManagementDependencies );
+        }
+        catch (Exception e) {
+            throw new MojoExecutionException("unable to create flattened dependencies", e);
+        }
+
+
+        if ( isEmbedBuildProfileDependencyManagement() )
+        {
+            Model projectModel = this.project.getModel();
+            DependencyManagementDependencies modelDependencies = new DependencyManagementDependencies();
+            modelDependencies.addAll( projectModel.getDependencyManagement().getDependencies() );
+            for ( Profile profile : projectModel.getProfiles() )
+            {
+                // build-time driven activation (by property or file)?
+                if ( isBuildTimeDriven( profile.getActivation() ) )
+                {
+                    List<Dependency> profileDependencyManagementDependencies = profile.getDependencyManagement().getDependencies();
+                    for ( Dependency profileDependencyManagementDependency : profileDependencyManagementDependencies )
+                    {
+                        if ( modelDependencies.contains( profileDependencyManagementDependency ) )
+                        {
+                            // our assumption here is that the profileDependency has been added to model because of
+                            // this build-time driven profile. Therefore we need to add it to the flattened POM.
+                            // Non build-time driven profiles will remain in the flattened POM with their dependencies
+                            // and
+                            // allow dynamic dependencies due to OS or JDK.
+                            flattenedDependencyManagementDependencies.add( modelDependencies.resolve(profileDependencyManagementDependency) );
+                        }
+                    }
+                }
+            }
+            getLog().debug( "Resolved " + flattenedDependencyManagementDependencies.size() + " dependency/-ies in DependencyManagement for flattened POM." );
+        }
+
+
+        return flattenedDependencyManagementDependencies;
     }
 
     /**
@@ -1037,6 +1098,18 @@ public class FlattenMojo
             if ( flattenedDependency != null )
             {
                 flattenedDependencies.add( flattenedDependency );
+            }
+        }
+    }
+
+    private void createFlattenedDependencyManagementDependenciesDirect( List<Dependency> projectDependencyManagementDependencies, List<Dependency> flattenedDependencyManagementDependencies )
+    {
+        for ( Dependency projectDependency : projectDependencyManagementDependencies )
+        {
+            Dependency flattenedDependency = createFlattenedDependencyManagementDependency( projectDependency );
+            if ( flattenedDependency != null )
+            {
+                flattenedDependencyManagementDependencies.add( flattenedDependency );
             }
         }
     }
@@ -1156,6 +1229,103 @@ public class FlattenMojo
         }
     }
 
+    private void createFlattenedDependencyManagementDependenciesAll( List<Dependency> projectDependencyManagementDependencies, List<Dependency> flattenedDependencyManagementDependencies )
+            throws DependencyTreeBuilderException, ArtifactDescriptorException
+    {
+        final Queue<DependencyNode> dependencyNodeLinkedList = new LinkedList<DependencyNode>();
+        final Set<String> processedDependencyManagementDependencies = new HashSet<>();
+
+        final Artifact projectArtifact = this.project.getArtifact();
+
+        final DependencyNode dependencyNode = this.dependencyTreeBuilder.buildDependencyTree(this.project,
+                this.localRepository, null);
+
+        dependencyNode.accept(new DependencyNodeVisitor()
+        {
+            @Override public boolean visit(DependencyNode node)
+            {
+                if (node.getArtifact().getGroupId().equals(projectArtifact.getGroupId()) && node.getArtifact().getArtifactId().equals(projectArtifact.getArtifactId()))
+                {
+                    return true;
+                }
+                if ("provided".equals(node.getArtifact().getScope()))
+                {
+                    DependencyNode parent = node.getParent();
+                    if(!parent.getArtifact().getGroupId().equals(projectArtifact.getGroupId()) || !parent.getArtifact().getArtifactId().equals(projectArtifact.getArtifactId()))
+                    {
+                        return false;
+                    }
+                }
+                if (node.getState() != DependencyNode.INCLUDED)
+                {
+                    return false;
+                }
+                if (node.getArtifact().isOptional())
+                {
+                    return false;
+                }
+                dependencyNodeLinkedList.add(node);
+                return true;
+            }
+
+            @Override public boolean endVisit(DependencyNode node)
+            {
+                return true;
+            }
+        });
+
+        while (!dependencyNodeLinkedList.isEmpty())
+        {
+            DependencyNode node = dependencyNodeLinkedList.poll();
+
+            Artifact artifact = node.getArtifact();
+
+            Dependency dependency = new Dependency();
+            dependency.setGroupId(artifact.getGroupId());
+            dependency.setArtifactId(artifact.getArtifactId());
+            dependency.setVersion(artifact.getVersion());
+            dependency.setClassifier(artifact.getClassifier());
+            dependency.setOptional(artifact.isOptional());
+            dependency.setScope(artifact.getScope());
+            dependency.setType(artifact.getType());
+
+            List<Exclusion> exclusions = new LinkedList<>();
+
+            org.eclipse.aether.artifact.Artifact aetherArtifact = new DefaultArtifact(artifact.getGroupId(), artifact.getArtifactId(), null, artifact.getVersion());
+            ArtifactDescriptorRequest request = new ArtifactDescriptorRequest(aetherArtifact, null, null);
+            ArtifactDescriptorResult artifactDescriptorResult = this.artifactDescriptorReader
+                    .readArtifactDescriptor(this.session.getRepositorySession(), request);
+
+            for (org.eclipse.aether.graph.Dependency artifactDependency: artifactDescriptorResult.getManagedDependencies())
+            {
+                if ("test".equals(artifactDependency.getScope()))
+                {
+                    continue;
+                }
+                Exclusion exclusion = new Exclusion();
+                exclusion.setGroupId(artifactDependency.getArtifact().getGroupId());
+                exclusion.setArtifactId(artifactDependency.getArtifact().getArtifactId());
+                exclusions.add(exclusion);
+            }
+
+            dependency.setExclusions(exclusions);
+
+            // convert dependency to string for the set, since Dependency doesn't implement equals, etc.
+            String dependencyString = dependency.getManagementKey();
+
+            if (!processedDependencyManagementDependencies.add(dependencyString))
+            {
+                continue;
+            }
+
+            Dependency flattenedDependencyManagementDependency = createFlattenedDependencyManagementDependency( dependency );
+            if (flattenedDependencyManagementDependency != null)
+            {
+                flattenedDependencyManagementDependencies.add(flattenedDependencyManagementDependency);
+            }
+        }
+    }
+
     /**
      * Collects the resolved {@link Dependency dependencies} from the given <code>effectiveModel</code>.
      *
@@ -1182,6 +1352,25 @@ public class FlattenMojo
         }
     }
 
+    protected void createFlattenedDependencyManagementDependencies( Model effectiveModel, List<Dependency> flattenedDependencyManagementDependencies )
+            throws MojoExecutionException
+    {
+        getLog().debug( "Resolving DependencyManagement dependencies of " + effectiveModel.getId() );
+        // this.project.getDependencies() already contains the inherited dependencies but also those from profiles
+        // List<Dependency> projectDependencies = currentProject.getOriginalModel().getDependencies();
+        List<Dependency> projectDependencies = effectiveModel.getDependencyManagement().getDependencies();
+
+        if (flattenDependencyMode == null | flattenDependencyMode == FlattenDependencyMode.direct) {
+            createFlattenedDependencyManagementDependenciesDirect(projectDependencies, flattenedDependencyManagementDependencies);
+        } else if (flattenDependencyMode == FlattenDependencyMode.all) {
+            try {
+                createFlattenedDependencyManagementDependenciesAll(projectDependencies, flattenedDependencyManagementDependencies);
+            } catch (Exception e) {
+                throw new MojoExecutionException("caught exception when flattening DependencyManagement dependencies", e);
+            }
+        }
+    }
+
     /**
      * @param projectDependency is the project {@link Dependency}.
      * @return the flattened {@link Dependency} or <code>null</code> if the given {@link Dependency} is NOT relevant for
@@ -1190,6 +1379,11 @@ public class FlattenMojo
     protected Dependency createFlattenedDependency( Dependency projectDependency )
     {
         return "test".equals( projectDependency.getScope() ) ? null : projectDependency;
+    }
+
+    protected Dependency createFlattenedDependencyManagementDependency( Dependency projectDependency )
+    {
+        return "import".equals( projectDependency.getScope() ) ? projectDependency : null;
     }
 
     /**
